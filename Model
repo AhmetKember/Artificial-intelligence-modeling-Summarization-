@@ -1,187 +1,342 @@
-!pip install datasets
+
 from datasets import load_dataset
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 import tensorflow as tf
-from nltk import sent_tokenize,word_tokenize
+from nltk import sent_tokenize, word_tokenize
 import numpy as np
-import io
-import json
-import pandas as pd
+import random
 import re
 from tensorflow.keras import layers
-import unicodedata
+from tensorflow.keras.models import Model
+from nltk.stem import WordNetLemmatizer
+import nltk
 
+nltk.download('wordnet')
+nltk.download('omw-1.4')
 
-dataset = load_dataset("scientific_papers", "pubmed")
+# Initialize the WordNetLemmatizer
+lemmatizer = WordNetLemmatizer()
 
-train_data=dataset['train'][:500]
-test_data=dataset['test']
+dataset = load_dataset("gigaword")
 
-train_input=train_data['article']
-train_target=train_data['abstract']
+train_data = dataset['train'][:100000]
+test_data = dataset['test'][:1000]
 
+train_input = train_data['document']
+train_target = train_data['summary']
+test_input = test_data['document']
 
+def preprocess_text_stopword(texts, stop_words):
+    preprocessed_texts = []
+
+    for text in texts:
+        cleaned_text = re.sub(r"[^a-zA-Z\s]", "", text)
+        words = cleaned_text.lower().split()
+
+        cleaned_words = [lemmatizer.lemmatize(word) for word in words if word not in stop_words]
+
+        preprocessed_texts.append(" ".join(cleaned_words))
+
+    return preprocessed_texts
 
 def preprocess_sentence(s):
-  s = re.sub(r"([?.!,¿])", r" \1 ", s)
-  s = re.sub(r'[" "]+', " ", s)
-  s = s.strip()
-  return s
+    s = re.sub(r"([?.!,¿])", r" \1 ", s)
+    s = re.sub(r'[" "]+', " ", s)
+    s = s.strip()
+    return s
 
 train_preprocessed_input = [preprocess_sentence(s) for s in train_input]
 train_preprocessed_target = [preprocess_sentence(s) for s in train_target]
 
-train_preprocessed_input[:1]  
-
-
 def tag_target_sentences(sentences):
-  tagged_sentences = map(lambda s: (' ').join(['<sos>', s, '<eos>']), sentences)
-  return list(tagged_sentences)
+    tagged_sentences = map(lambda s: (' ').join(['<sos>', s, '<eos>']), sentences)
+    return list(tagged_sentences)
 
-train_tagged_preprocessed_target = tag_target_sentences(train_preprocessed_target)  
+train_tagged_preprocessed_target = tag_target_sentences(train_preprocessed_target)
 
 source_tokenizer = tf.keras.preprocessing.text.Tokenizer(oov_token='<unk>', filters='"#$%&()*+-/:;=@[\\]^_`{|}~\t\n')
 source_tokenizer.fit_on_texts(train_preprocessed_input)
-source_tokenizer.get_config()
-
 
 source_vocab_size = len(source_tokenizer.word_index) + 1
-print(source_vocab_size)
 
 target_tokenizer = tf.keras.preprocessing.text.Tokenizer(oov_token='<unk>', filters='"#$%&()*+-/:;=@[\\]^_`{|}~\t\n')
 target_tokenizer.fit_on_texts(train_tagged_preprocessed_target)
-target_tokenizer.get_config()
 
 target_vocab_size = len(target_tokenizer.word_index) + 1
-print(target_vocab_size)
 
 train_encoder_inputs = source_tokenizer.texts_to_sequences(train_preprocessed_input)
 
-
 def generate_decoder_inputs_targets(sentences, tokenizer):
-  seqs = tokenizer.texts_to_sequences(sentences)
-  decoder_inputs = [s[:-1] for s in seqs]
-  decoder_targets = [s[1:] for s in seqs]
+    seqs = tokenizer.texts_to_sequences(sentences)
+    decoder_inputs = [s[:-1] for s in seqs]
+    decoder_targets = [s[1:] for s in seqs]
+    return decoder_inputs, decoder_targets
 
-  return decoder_inputs, decoder_targets
-
-train_decoder_inputs, train_decoder_targets = generate_decoder_inputs_targets(train_tagged_preprocessed_target,target_tokenizer)
+train_decoder_inputs, train_decoder_targets = generate_decoder_inputs_targets(train_tagged_preprocessed_target, target_tokenizer)
 
 max_encoding_len = len(max(train_encoder_inputs, key=len))
-max_encoding_len
-
 max_decoding_len = len(max(train_decoder_inputs, key=len))
-max_decoding_len
 
 padded_train_encoder_inputs = pad_sequences(train_encoder_inputs, max_encoding_len, padding='post', truncating='post')
 padded_train_decoder_inputs = pad_sequences(train_decoder_inputs, max_decoding_len, padding='post', truncating='post')
 padded_train_decoder_targets = pad_sequences(train_decoder_targets, max_decoding_len, padding='post', truncating='post')
 
-target_tokenizer.sequences_to_texts([padded_train_decoder_inputs[0]])
-
-
 def process_dataset(dataset):
+    input = dataset['document']
+    output = dataset['summary']
+    
+    preprocessed_input = [preprocess_sentence(s) for s in input]
+    preprocessed_output = [preprocess_sentence(s) for s in output]
 
+    stop_words = set([
+        "a", "an", "and", "but", "or", "the", "this", "that", "is", "are",
+        "was", "were", "with", "in", "on", "at", "for", "to", "from", "by",
+        "it", "he", "she", "they", "them", "we", "us", "you", "your", "yours",
+        "his", "her", "its", "their", "theirs", "our", "ours", "me", "my", "mine"
+    ])
 
-  input=dataset['article']
-  output=dataset['abstract']
+    preprocessed_input = preprocess_text_stopword(preprocessed_input, stop_words)
+    preprocessed_output = preprocess_text_stopword(preprocessed_output, stop_words)
 
-  preprocessed_input = [preprocess_sentence(s) for s in input]
-  preprocessed_output = [preprocess_sentence(s) for s in output]
+    tagged_preprocessed_output = tag_target_sentences(preprocessed_output)
 
+    encoder_inputs = source_tokenizer.texts_to_sequences(preprocessed_input)
+    decoder_inputs, decoder_targets = generate_decoder_inputs_targets(tagged_preprocessed_output, target_tokenizer)
 
-  tagged_preprocessed_output = tag_target_sentences(preprocessed_output)
+    padded_encoder_inputs = pad_sequences(encoder_inputs, max_encoding_len, padding='post', truncating='post')
+    padded_decoder_inputs = pad_sequences(decoder_inputs, max_decoding_len, padding='post', truncating='post')
+    padded_decoder_targets = pad_sequences(decoder_targets, max_decoding_len, padding='post', truncating='post')
 
-
-  encoder_inputs = source_tokenizer.texts_to_sequences(preprocessed_input)
-
-
-  decoder_inputs, decoder_targets = generate_decoder_inputs_targets(tagged_preprocessed_output,
-                                                                    target_tokenizer)
-
-
-  padded_encoder_inputs = pad_sequences(encoder_inputs, max_encoding_len, padding='post', truncating='post')
-  padded_decoder_inputs = pad_sequences(decoder_inputs, max_decoding_len, padding='post', truncating='post')
-  padded_decoder_targets = pad_sequences(decoder_targets, max_decoding_len, padding='post', truncating='post')
-
-  return padded_encoder_inputs, padded_decoder_inputs, padded_decoder_targets
-
+    return padded_encoder_inputs, padded_decoder_inputs, padded_decoder_targets
 
 padded_val_encoder_inputs, padded_val_decoder_inputs, padded_val_decoder_targets = process_dataset(test_data)
 
-
 embedding_dim = 128
 hidden_dim = 256
-default_dropout=0.2
-batch_size = 32
+default_dropout = 0.3
+batch_size = 64
 epochs = 30
 
 encoder_inputs = layers.Input(shape=[None], name='encoder_inputs')
 
-encoder_embeddings = layers.Embedding(source_vocab_size,
+encoder_embeddings = layers.Embedding(source_vocab_size, 
                                       embedding_dim,
                                       mask_zero=True,
-                                      name='encoder_embeddings')
+                                      name='encoder_embeddings')(encoder_inputs)
 
+encoder_bilstm = layers.Bidirectional(layers.LSTM(hidden_dim, 
+                                                  return_sequences=True,
+                                                  return_state=True, 
+                                                  dropout=default_dropout,
+                                                  name='encoder_bilstm'))
 
-encoder_embedding_output = encoder_embeddings(encoder_inputs)
+encoder_outputs, forward_h, forward_c, backward_h, backward_c = encoder_bilstm(encoder_embeddings)
 
-encoder_lstm = layers.LSTM(hidden_dim,
-                           return_state=True,
-                           dropout=default_dropout,
-                           name='encoder_lstm')
-
-
-encoder_outputs, state_h, state_c = encoder_lstm(encoder_embedding_output)
-
-encoder_states = (state_h, state_c)
+state_h = layers.Concatenate()([forward_h, backward_h])
+state_c = layers.Concatenate()([forward_c, backward_c])
+encoder_states = [state_h, state_c]
 
 decoder_inputs = layers.Input(shape=[None], name='decoder_inputs')
 
-
-decoder_embeddings = layers.Embedding(target_vocab_size,
-                                      embedding_dim,
+decoder_embeddings = layers.Embedding(target_vocab_size, 
+                                      embedding_dim, 
                                       mask_zero=True,
-                                      name='decoder_embeddings')
+                                      name='decoder_embeddings')(decoder_inputs)
 
-
-decoder_embedding_output = decoder_embeddings(decoder_inputs)
-
-
-decoder_lstm = layers.LSTM(hidden_dim,
+decoder_lstm = layers.LSTM(hidden_dim * 2,
                            return_sequences=True,
                            return_state=True,
                            dropout=default_dropout,
                            name='decoder_lstm')
 
-decoder_outputs, _, _ = decoder_lstm(decoder_embedding_output, initial_state=encoder_states)
+decoder_lstm_outputs, _, _ = decoder_lstm(decoder_embeddings, initial_state=encoder_states)
 
+attention = layers.AdditiveAttention(name='attention_layer')
+context_vector, attention_weights = attention([decoder_lstm_outputs, encoder_outputs], return_attention_scores=True)
+
+decoder_concat_input = layers.Concatenate(axis=-1)([context_vector, decoder_lstm_outputs])
 decoder_dense = layers.Dense(target_vocab_size, activation='softmax', name='decoder_dense')
-y_proba = decoder_dense(decoder_outputs)
+decoder_outputs = decoder_dense(decoder_concat_input)
 
+model = tf.keras.Model([encoder_inputs, decoder_inputs], decoder_outputs, name='model_encoder_decoder')
 
-model =tf.keras.Model([encoder_inputs,decoder_inputs],y_proba,name='model_encoder_training')
-
-model.compile(optimizer='adam',loss='sparse_categorical_crossentropy',  metrics=['sparse_categorical_accuracy'])
+model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['sparse_categorical_accuracy'])
 model.summary()
 
-
-filepath="C:/Users/AHMET CEBİR KEMBER/Desktop/Programlama/python/AI"
-
+filepath="C:/Users/Ahmet/Desktop/python/AI/weight.h5"
 
 cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=filepath,
                                                  save_weights_only=True,
                                                  verbose=1)
 
-es_callback = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=3)
-
-
+es_callback = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=4)
+#%%
 history = model.fit([padded_train_encoder_inputs, padded_train_decoder_inputs], padded_train_decoder_targets,
                      batch_size=batch_size,
                      epochs=epochs,
-                     validation_data=([padded_val_encoder_inputs, padded_val_decoder_inputs], padded_val_decoder_targets))
+                     validation_data=([padded_val_encoder_inputs, padded_val_decoder_inputs], padded_val_decoder_targets),
+                     callbacks=[cp_callback, es_callback])
+
+model.save('C:/Users/Ahmet/Desktop/python/AI/model.h5')
+
+#%%
+filepath = "C:/Users/Ahmet/Desktop/python/AI/weights.h5"
+model.load_weights(filepath)
+
+model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['sparse_categorical_accuracy'])
+model.summary()
+#%%
+import io
+import json
+
+# Tokenizer'ları kaydetme
+source_tokenizer_json = source_tokenizer.to_json()
+with io.open('C:/Users/Ahmet/Desktop/python/source_tokenizer1.json', 'w', encoding='utf-8') as f:
+    f.write(json.dumps(source_tokenizer_json, ensure_ascii=False))
+
+target_tokenizer_json = target_tokenizer.to_json()
+with io.open('C:/Users/Ahmet/Desktop/python/target_tokenizer1.json', 'w', encoding='utf-8') as f:
+    f.write(json.dumps(target_tokenizer_json, ensure_ascii=False))
 
 
-model.save('model')
+
+#%%
+
+import os
+import json
+import io
+import speech_recognition as sr
+import moviepy.editor as mp
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras import layers
+
+
+# Tokenizers' paths
+source_tokenizer_path = "C:/Users/Ahmet/Desktop/python/source_tokenizer1.json"
+target_tokenizer_path = "C:/Users/Ahmet/Desktop/python/target_tokenizer1.json"
+
+# Load tokenizers
+with open(source_tokenizer_path) as f:
+    source_tokenizer = tf.keras.preprocessing.text.tokenizer_from_json(json.load(f))
+
+with open(target_tokenizer_path) as f:
+    target_tokenizer = tf.keras.preprocessing.text.tokenizer_from_json(json.load(f))
+
+# Load model
+model_path = "C:/Users/Ahmet/Desktop/python/AI/model.h5"
+model = tf.keras.models.load_model(model_path)
+
+padded_test_encoder_inputs, padded_test_decoder_inputs, padded_test_decoder_targets = process_dataset(test_data)
+model.evaluate([padded_test_encoder_inputs, padded_test_decoder_inputs], padded_test_decoder_targets)
+
+#%%
+def extract_audio(input_video, output_audio):
+    clip = mp.VideoFileClip(input_video)
+    clip.audio.write_audiofile(output_audio)
+
+def split_audio(input_audio, output_folder, chunk_duration=60):
+    clip = mp.AudioFileClip(input_audio)
+    total_duration = clip.duration
+    start_time = 0
+    end_time = chunk_duration
+    chunk_count = 1
+
+    while start_time < total_duration:
+        if end_time > total_duration:
+            end_time = total_duration
+        output_file = os.path.join(output_folder, f"chunk_{chunk_count}.wav")
+        sub_clip = clip.subclip(start_time, end_time)
+        sub_clip.write_audiofile(output_file)
+        start_time = end_time
+        end_time += chunk_duration
+        chunk_count += 1
+        
+    os.remove(input_audio)
+    print(f"{input_audio} başarıyla silindi.")
+
+def transcribe_audio(input_audio):
+    r = sr.Recognizer()
+    with sr.AudioFile(input_audio) as source:
+        audio_file = r.record(source)
+    return r.recognize_google(audio_file)
+# %%
+def predict_summary(input_text, source_tokenizer, encoder_model, target_tokenizer, decoder_model, max_decoding_len, max_encoding_len):
+    tokenized_input = source_tokenizer.texts_to_sequences([input_text])
+    padded_tokenized_input = pad_sequences(tokenized_input, maxlen=max_encoding_len, padding='post')
+    
+    target_sentence = '<sos>'
+    target_sentence_tokenized = target_tokenizer.texts_to_sequences([target_sentence])[0]
+    target_sentence_tokenized = pad_sequences([target_sentence_tokenized], maxlen=max_decoding_len, padding='post')
+    
+    summary = []
+    for i in range(max_decoding_len - 1):
+        predictions = decoder_model.predict([padded_tokenized_input, target_sentence_tokenized])
+        predicted_id = np.argmax(predictions[0, i, :])
+        predicted_word = target_tokenizer.index_word.get(predicted_id)
+        
+        if predicted_word == '<eos>':
+            break
+        
+        summary.append(predicted_word)
+        target_sentence_tokenized[0, i + 1] = predicted_id
+    
+    return input_text, ' '.join(summary)
+
+
+
+#%%
+def main(input_video, output_folder, output_fulltext, output_summary):
+    audio_file = os.path.join(output_folder, "audio.wav")
+    extract_audio(input_video, audio_file)
+    split_audio(audio_file, output_folder)
+    
+    full_text = ""
+    for filename in os.listdir(output_folder):
+        if filename.endswith(".wav"):
+            audio_path = os.path.join(output_folder, filename)
+            text_path = os.path.join(output_folder, f"{filename.split('.')[0]}.txt")
+            result = transcribe_audio(audio_path)
+            full_text += result + "\n"
+            with open(text_path, mode="w") as file:
+                file.write(result)
+
+    with open(output_fulltext, mode="w") as fulltext_file:
+        fulltext_file.write(full_text)
+  #%%  
+file_path = "C:/Users/Ahmet/Desktop/VideoToText/output/fulltext.txt"  # Okunacak dosyanın yolu
+output_summary = "C:/Users/Ahmet/Desktop/VideoToText/output/summary.txt"  # Özetin yazılacağı dosyanın yolu
+
+with open(file_path, "r", encoding="utf-8") as file:
+    # Dosyanın tamamını oku
+    full_text = file.read()
+
+# predict_summary fonksiyonunu kullanarak tahmin yap
+tokenized_sentence, prediction = predict_summary(
+    full_text,
+    source_tokenizer,
+    model,  
+    target_tokenizer,
+    model, 
+    max_decoding_len,
+    max_encoding_len
+)
+
+
+with open(output_summary, mode="w", encoding="utf-8") as summary_file:
+    summary_file.write(prediction)
+
+print("Tokenized Original:", tokenized_sentence)
+print("Prediction:", prediction)
+#%%
+if __name__ == "__main__":
+    input_video = "C:/Users/Ahmet/Desktop/VideoToText/input/What is NLP (Natural Language Processing)_.mp4"
+    output_folder = "C:/Users/Ahmet/Desktop/VideoToText/output"
+    output_text = "C:/Users/Ahmet/Desktop/VideoToText/output/fulltext.txt"
+    output_summary = "C:/Users/Ahmet/Desktop/VideoToText/output/fullsummary.txt"
+    main(input_video, output_folder, output_text, output_summary)
+
+
 
